@@ -13,6 +13,9 @@ on:
         required: true
         default: 'latest'
 
+permissions:
+  contents: write
+
 env:
   CADDY_TAG: ${{ inputs.caddy_tag }}
 
