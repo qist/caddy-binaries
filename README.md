@@ -24,6 +24,7 @@
 | macOS | amd64 | `.tar.gz` |
 | macOS | arm64 | `.tar.gz` |
 | FreeBSD | amd64 | `.tar.gz` |
+| FreeBSD | arm64 | `.tar.gz` |
 
 ## 下载
 
@@ -46,11 +47,11 @@ caddy_<version>_<os>_<arch>.zip      # Windows
 ### Linux/macOS
 
 ```bash
-# 解压
+# 解压（直接得到二进制文件）
 tar -xzf caddy_v2.9.0_linux_amd64.tar.gz
 
 # 运行
-cd caddy
+chmod +x caddy
 ./caddy version
 ./caddy run --config Caddyfile
 ```
@@ -58,11 +59,10 @@ cd caddy
 ### Windows
 
 ```powershell
-# 解压
-Expand-Archive caddy_v2.9.0_windows_amd64.zip
+# 解压（直接得到二进制文件）
+Expand-Archive caddy_v2.9.0_windows_amd64.zip -DestinationPath .
 
 # 运行
-cd caddy
 .\caddy version
 .\caddy run --config Caddyfile
 ```

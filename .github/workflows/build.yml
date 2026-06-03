@@ -92,6 +92,14 @@ jobs:
             suffix: freebsd_amd64
             ext: ''
             archive: tar.gz
+          # FreeBSD ARM64
+          - os: freebsd
+            arch: arm64
+            goarch: arm64
+            goos: freebsd
+            suffix: freebsd_arm64
+            ext: ''
+            archive: tar.gz
 
     steps:
       - name: Set up Go
@@ -119,27 +127,34 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
+          GOFLAGS: "-ldflags '-s -w -extldflags=-static'"
         run: |
-          mkdir -p build/caddy
-          OUTPUT="build/caddy/caddy${{ matrix.ext }}"
+          mkdir -p build
+          OUTPUT="build/caddy${{ matrix.ext }}"
           
-          # Build with caddy-l4 plugin
+          # Build with caddy-l4 plugin - fully static compilation
           xcaddy build ${{ steps.version.outputs.tag }} \
             --with github.com/mholt/caddy-l4 \
-            --output $OUTPUT
+            --output $OUTPUT \
+            --ldflags '-s -w'
           
-          # Verify build
+          # Verify build - check for dynamic dependencies
           ls -lh $OUTPUT
+          if [ "${{ matrix.os }}" = "linux" ]; then
+            ldd $OUTPUT 2>/dev/null || echo "Static binary (no ldd output expected)"
+          fi
 
       - name: Create archive
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           cd build
           
+          BINARY="caddy${{ matrix.ext }}"
+          
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czvf "caddy_${TAG}_${{ matrix.suffix }}.tar.gz" caddy/
+            tar -czvf "caddy_${TAG}_${{ matrix.suffix }}.tar.gz" "$BINARY"
           else
-            zip -r "caddy_${TAG}_${{ matrix.suffix }}.zip" caddy/
+            zip "caddy_${TAG}_${{ matrix.suffix }}.zip" "$BINARY"
           fi
           
           ls -lh
