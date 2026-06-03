@@ -127,7 +127,6 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
-          GOFLAGS: "-ldflags '-s -w -extldflags=-static'"
         run: |
           mkdir -p build
           OUTPUT="build/caddy${{ matrix.ext }}"
