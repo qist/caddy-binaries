@@ -135,8 +135,7 @@ jobs:
           # Build with caddy-l4 plugin - fully static compilation
           xcaddy build ${{ steps.version.outputs.tag }} \
             --with github.com/mholt/caddy-l4 \
-            --output $OUTPUT \
-            --ldflags '-s -w'
+            --output $OUTPUT
           
           # Verify build - check for dynamic dependencies
           ls -lh $OUTPUT
