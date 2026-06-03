@@ -217,7 +217,7 @@ jobs:
             - Linux (amd64, arm64, armv7)
             - Windows (amd64, arm64)
             - macOS (amd64, arm64)
-            - FreeBSD (amd64)
+            - FreeBSD (amd64, arm64)
             
             ## Checksums
             SHA256 checksums are provided in `caddy_${{ needs.build.outputs.build_tag || inputs.caddy_tag }}_checksums.txt`.
