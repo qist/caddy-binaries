@@ -1,0 +1,230 @@
+name: Build Caddy with L4 Plugin
+
+on:
+  workflow_call:
+    inputs:
+      caddy_tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      caddy_tag:
+        description: 'Caddy version tag (e.g., v2.9.0)'
+        required: true
+        default: 'latest'
+
+env:
+  CADDY_TAG: ${{ inputs.caddy_tag }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      build_tag: ${{ steps.version.outputs.tag }}
+    strategy:
+      matrix:
+        include:
+          # Linux AMD64
+          - os: linux
+            arch: amd64
+            goarch: amd64
+            goos: linux
+            suffix: linux_amd64
+            ext: ''
+            archive: tar.gz
+          # Linux ARM64
+          - os: linux
+            arch: arm64
+            goarch: arm64
+            goos: linux
+            suffix: linux_arm64
+            ext: ''
+            archive: tar.gz
+          # Linux ARMv7
+          - os: linux
+            arch: armv7
+            goarch: arm
+            goarm: 7
+            goos: linux
+            suffix: linux_armv7
+            ext: ''
+            archive: tar.gz
+          # Windows AMD64
+          - os: windows
+            arch: amd64
+            goarch: amd64
+            goos: windows
+            suffix: windows_amd64
+            ext: '.exe'
+            archive: zip
+          # Windows ARM64
+          - os: windows
+            arch: arm64
+            goarch: arm64
+            goos: windows
+            suffix: windows_arm64
+            ext: '.exe'
+            archive: zip
+          # macOS AMD64
+          - os: darwin
+            arch: amd64
+            goarch: amd64
+            goos: darwin
+            suffix: darwin_amd64
+            ext: ''
+            archive: tar.gz
+          # macOS ARM64 (Apple Silicon)
+          - os: darwin
+            arch: arm64
+            goarch: arm64
+            goos: darwin
+            suffix: darwin_arm64
+            ext: ''
+            archive: tar.gz
+          # FreeBSD AMD64
+          - os: freebsd
+            arch: amd64
+            goarch: amd64
+            goos: freebsd
+            suffix: freebsd_amd64
+            ext: ''
+            archive: tar.gz
+
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+
+      - name: Determine Caddy version
+        id: version
+        run: |
+          if [ "${{ inputs.caddy_tag }}" = "latest" ] || [ -z "${{ inputs.caddy_tag }}" ]; then
+            TAG=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+          else
+            TAG="${{ inputs.caddy_tag }}"
+          fi
+          echo "CADDY_VERSION=$TAG" >> $GITHUB_ENV
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Building Caddy version: $TAG"
+
+      - name: Install xcaddy
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+      - name: Build Caddy with L4 plugin
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: 0
+        run: |
+          mkdir -p build/caddy
+          OUTPUT="build/caddy/caddy${{ matrix.ext }}"
+          
+          # Build with caddy-l4 plugin
+          xcaddy build ${{ steps.version.outputs.tag }} \
+            --with github.com/mholt/caddy-l4 \
+            --output $OUTPUT
+          
+          # Verify build
+          ls -lh $OUTPUT
+
+      - name: Create archive
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          cd build
+          
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czvf "caddy_${TAG}_${{ matrix.suffix }}.tar.gz" caddy/
+          else
+            zip -r "caddy_${TAG}_${{ matrix.suffix }}.zip" caddy/
+          fi
+          
+          ls -lh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: caddy-${{ matrix.suffix }}
+          path: build/caddy_*_${{ matrix.suffix }}.*
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: caddy-*
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          
+          # Get the tag
+          TAG="${{ needs.build.outputs.build_tag }}"
+          [ -z "$TAG" ] && TAG="${{ inputs.caddy_tag }}"
+          
+          # Move and rename artifacts
+          for dir in artifacts/caddy-*; do
+            if [ -d "$dir" ]; then
+              for file in "$dir"/*; do
+                if [ -f "$file" ]; then
+                  cp "$file" release/
+                fi
+              done
+            fi
+          done
+          
+          # Create SHA256 checksum file
+          cd release
+          sha256sum * > caddy_${TAG}_checksums.txt
+          
+          ls -lh
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.build_tag || inputs.caddy_tag }}
+          name: Caddy ${{ needs.build.outputs.build_tag || inputs.caddy_tag }} with L4 Plugin
+          body: |
+            Caddy ${{ needs.build.outputs.build_tag || inputs.caddy_tag }} built with [caddy-l4](https://github.com/mholt/caddy-l4) plugin support.
+            
+            ## Included Platforms
+            - Linux (amd64, arm64, armv7)
+            - Windows (amd64, arm64)
+            - macOS (amd64, arm64)
+            - FreeBSD (amd64)
+            
+            ## Checksums
+            SHA256 checksums are provided in `caddy_${{ needs.build.outputs.build_tag || inputs.caddy_tag }}_checksums.txt`.
+            
+            ## Usage
+            The L4 (Layer 4) app allows Caddy to proxy raw TCP/UDP connections.
+            See [caddy-l4 documentation](https://github.com/mholt/caddy-l4) for configuration examples.
+            
+            ## File Naming
+            ```
+            caddy_<version>_<os>_<arch>.tar.gz  (Linux/macOS/FreeBSD)
+            caddy_<version>_<os>_<arch>.zip      (Windows)
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
+          make_latest: true
+
+      - name: Update built tag file
+        run: |
+          echo "${{ needs.build.outputs.build_tag || inputs.caddy_tag }}" > built_tag.txt
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add built_tag.txt
+          git commit -m "Update built tag to ${{ needs.build.outputs.build_tag || inputs.caddy_tag }}" || echo "No changes to commit"
+          git push || echo "Nothing to push"

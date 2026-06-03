@@ -1,0 +1,67 @@
+name: Check and Build Caddy
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC to check for new Caddy releases
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Allow manual trigger
+  repository_dispatch:
+    # Allow triggering via API
+    types: [check-tag]
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      latest_tag: ${{ steps.get_tag.outputs.tag }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest Caddy tag
+        id: get_tag
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Latest Caddy tag: $TAG"
+
+      - name: Get current latest built tag
+        id: current_tag
+        run: |
+          if [ -f built_tag.txt ]; then
+            CURRENT=$(cat built_tag.txt)
+            echo "Current built tag: $CURRENT"
+            echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          else
+            echo "No built tag file found, will build"
+            echo "current=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compare tags
+        id: compare
+        run: |
+          LATEST="${{ steps.get_tag.outputs.tag }}"
+          CURRENT="${{ steps.current_tag.outputs.current }}"
+          
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo "New tag detected: $LATEST (current: $CURRENT)"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Already on latest tag: $LATEST"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger build workflow
+        if: steps.compare.outputs.should_build == 'true'
+        run: |
+          echo "Triggering build for tag: ${{ steps.get_tag.outputs.tag }}"
+
+  build:
+    needs: check-tag
+    if: needs.check-tag.outputs.should_build == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      caddy_tag: ${{ needs.check-tag.outputs.latest_tag }}
+    secrets: inherit
