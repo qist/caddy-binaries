@@ -76,10 +76,10 @@ caddy_v2.9.0_linux_amd64.tar.gz
 # 解压（得到二进制文件 + 规则配置目录）
 tar -xzf caddy_v2.9.0_linux_amd64.tar.gz
 
-# 运行
+# 运行（使用 caddyguardfile 适配器，WAF 全局自动生效）
 chmod +x caddy
 ./caddy version
-./caddy run --config Caddyfile
+./caddy run --config Caddyfile --adapter caddyguardfile
 ```
 
 ### Windows
@@ -88,12 +88,12 @@ chmod +x caddy
 # 解压（得到二进制文件 + 规则配置目录）
 Expand-Archive caddy_v2.9.0_windows_amd64.zip -DestinationPath .
 
-# 运行
+# 运行（使用 caddyguardfile 适配器，WAF 全局自动生效）
 .\caddy version
-.\caddy run --config Caddyfile
+.\caddy run --config Caddyfile --adapter caddyguardfile
 ```
 
-> **注意**：如果使用 caddyguard WAF 功能，请将 `caddyguard/` 目录复制到 `/etc/caddyguard/rule-config`，或在 Caddyfile 中指定实际路径。
+> **注意**：如果使用 caddyguard WAF 功能，请将 `caddyguard/` 目录复制到 `/etc/caddyguard/rule-config`，或在 Caddyfile 中指定实际路径。使用 `--adapter caddyguardfile` 启动可全局自动生效，无需在每个站点单独配置。
 
 ## 包含的插件
 
@@ -170,32 +170,81 @@ localhost:80 {
 
 caddyguard 是一个 Caddy 安全防护插件，提供 WAF（Web 应用防火墙）功能，包括：
 
+- **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
-- **高性能**：正则预编译 + 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
+- **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
-#### 全局配置（推荐）
+#### 配置方式
 
-在全局块中配置一次即可，自动对所有站点生效，无需在每个域名单独配置：
+CaddyGuard 提供两种配置方式：
+
+##### 方式 1：全局配置 + `caddyguardfile` 适配器（推荐）
+
+全局配置一次 `rule_dir`，所有站点自动启用 WAF，**站点块不需要写 `caddyguard`**。
+`caddyguardfile` 适配器在解析 Caddyfile 后自动向每个 HTTP server 注入 Guard handler。
 
 ```caddyfile
 {
-    # 全局 WAF 配置
+    auto_https off
+
+    # 全局 WAF 配置 — 只写一次
     caddyguard {
         rule_dir /etc/caddyguard/rule-config
     }
 }
 
+# 站点不需要写 caddyguard，自动生效
 example.com {
     reverse_proxy 127.0.0.1:8080
 }
 
-another.example.com {
-    respond "Hello, World!"
+another.com {
+    reverse_proxy 127.0.0.1:9090
 }
 ```
+
+启动时使用 `--adapter caddyguardfile`：
+
+```bash
+caddy run --config /etc/caddy/Caddyfile --adapter caddyguardfile
+```
+
+##### 方式 2：站点级配置 + 标准 `caddyfile` 适配器
+
+每个站点单独写 `caddyguard` 指令，适合需要精细控制的场景。
+
+```caddyfile
+{
+    auto_https off
+}
+
+example.com {
+    caddyguard {
+        rule_dir /etc/caddyguard/rule-config
+    }
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+启动时使用标准 `caddyfile` 适配器（默认）：
+
+```bash
+caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+##### 两种方式对比
+
+| | 方式 1：caddyguardfile | 方式 2：caddyfile |
+|---|---|---|
+| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 |
+| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 |
+| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） |
+| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 |
+| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 |
 
 #### 规则目录结构
 
@@ -266,13 +315,25 @@ another.example.com {
 select.+(from|limit)
 (?:(union(.*?)select))
 sleep\((\s*)(\d*)(\s*)\)
-<(iframe|script|body|img|layer|div|meta|style|base|object|input)
+\<(iframe|script|body|img|layer|div|meta|style|base|object|input)
 
 # useragent.rule — 恶意 UA
 (HTTrack|harvest|audit|dirbuster|pangolin|nmap|sqlmap|w3af|owasp|Nikto)
 (Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|Nuclei|httpx)
+(Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher)
 
-# whiteua.rule — User-Agent 白名单（搜索引擎蜘蛛）
+# fileext.rule — 文件上传扩展名黑名单
+\.php
+.*\.(htaccess|bash_history|htpasswd|gitignore|gitattributes|env|config|sql|bak|backup|old|tmp|log|swp|sql\.gz)
+
+# referer.rule — 恶意 Referer 黑名单（支付接口保护）
+\.pay\.
+\.alipay\.
+\.tenpay\.
+\.paypal\.
+\.stripe\.
+
+# whiteua.rule — User-Agent 白名单（搜索引擎蜘蛛，仅跳过 UA 黑名单检测）
 Googlebot
 Baiduspider
 bingbot
@@ -282,11 +343,11 @@ YandexBot
 
 #### 三种白名单的区别
 
-| 白名单 | 文件 | 行为 |
-|--------|------|------|
-| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 12 项检测 |
-| **白名单 URL** | `whiteurl.rule` | **全局放行**，跳过全部 12 项检测 |
-| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 |
+| 白名单 | 文件 | 行为 | 说明 |
+|--------|------|------|------|
+| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 12 项检测 | 信任 IP，完全不做任何安全检测 |
+| **白名单 URL** | `whiteurl.rule` | **全局放行**，跳过全部 12 项检测 | 信任 URL 路径，完全不做任何安全检测 |
+| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/POST 等检测约束 |
 
 #### domain.json 域名级覆盖
 
@@ -338,6 +399,8 @@ example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
+
+> 使用 `--adapter caddyguardfile` 启动时，WAF 会自动对所有 HTTP 站点生效，同时 layer4 配置正常工作。
 
 ## 自动构建
 
