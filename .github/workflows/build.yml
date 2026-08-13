@@ -1,30 +1,77 @@
-name: Build Caddy with L4 Plugin
+name: Auto Build Caddy with L4 Plugin
 
 on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天凌晨检查
   workflow_call:
     inputs:
       caddy_tag:
-        required: true
+        required: false
         type: string
+        default: 'latest'
   workflow_dispatch:
     inputs:
       caddy_tag:
         description: 'Caddy version tag (e.g., v2.9.0)'
-        required: true
+        required: false
         default: 'latest'
 
 permissions:
   contents: write
 
-env:
-  CADDY_TAG: ${{ inputs.caddy_tag }}
-
 jobs:
-  build:
+  check-version:
+    name: Check for new Caddy version
     runs-on: ubuntu-latest
     outputs:
-      build_tag: ${{ steps.version.outputs.tag }}
+      build_tag: ${{ steps.check.outputs.build_tag }}
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Caddy version
+        id: get-version
+        run: |
+          INPUT_TAG="${{ inputs.caddy_tag }}"
+          if [ "$INPUT_TAG" = "latest" ] || [ -z "$INPUT_TAG" ]; then
+            TAG=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+          else
+            TAG="$INPUT_TAG"
+          fi
+
+          if [ -z "$TAG" ]; then
+            echo "Error: Failed to determine Caddy version"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Caddy version: $TAG"
+
+      - name: Check if already built
+        id: check
+        run: |
+          TAG=${{ steps.get-version.outputs.tag }}
+
+          if git tag | grep -q "^${TAG}$"; then
+            echo "Tag $TAG already exists, skipping build"
+            echo "build_tag=$TAG" >> $GITHUB_OUTPUT
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version $TAG found, starting build"
+            echo "build_tag=$TAG" >> $GITHUB_OUTPUT
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build Caddy ${{ needs.check-version.outputs.build_tag }} ${{ matrix.suffix }}
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Linux AMD64
@@ -105,18 +152,6 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
 
-      - name: Determine Caddy version
-        id: version
-        run: |
-          if [ "${{ inputs.caddy_tag }}" = "latest" ] || [ -z "${{ inputs.caddy_tag }}" ]; then
-            TAG=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
-          else
-            TAG="${{ inputs.caddy_tag }}"
-          fi
-          echo "CADDY_VERSION=$TAG" >> $GITHUB_ENV
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Building Caddy version: $TAG"
-
       - name: Install xcaddy
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -130,31 +165,41 @@ jobs:
         run: |
           mkdir -p build
           OUTPUT="build/caddy${{ matrix.ext }}"
-          
-          # Build with caddy-l4 plugin - fully static compilation
-          xcaddy build ${{ steps.version.outputs.tag }} \
+
+          # Build with caddy-l4 and caddyguard plugins - fully static compilation
+          xcaddy build ${{ needs.check-version.outputs.build_tag }} \
             --with github.com/mholt/caddy-l4 \
+            --with github.com/qist/caddyguard \
             --output $OUTPUT
-          
+
           # Verify build - check for dynamic dependencies
           ls -lh $OUTPUT
           if [ "${{ matrix.os }}" = "linux" ]; then
             ldd $OUTPUT 2>/dev/null || echo "Static binary (no ldd output expected)"
           fi
 
+      - name: Fetch caddyguard rule-config
+        run: |
+          # 浅克隆 caddyguard 仓库，获取规则配置文件
+          git clone --depth=1 https://github.com/qist/caddyguard.git /tmp/caddyguard
+          cp -r /tmp/caddyguard/rule-config build/caddyguard
+          rm -rf /tmp/caddyguard
+          echo "Rule config files:"
+          ls -la build/caddyguard/
+
       - name: Create archive
         run: |
-          TAG="${{ steps.version.outputs.tag }}"
+          TAG="${{ needs.check-version.outputs.build_tag }}"
           cd build
-          
+
           BINARY="caddy${{ matrix.ext }}"
-          
+
           if [ "${{ matrix.archive }}" = "tar.gz" ]; then
-            tar -czvf "caddy_${TAG}_${{ matrix.suffix }}.tar.gz" "$BINARY"
+            tar -czvf "caddy_${TAG}_${{ matrix.suffix }}.tar.gz" "$BINARY" caddyguard/
           else
-            zip "caddy_${TAG}_${{ matrix.suffix }}.zip" "$BINARY"
+            zip -r "caddy_${TAG}_${{ matrix.suffix }}.zip" "$BINARY" caddyguard/
           fi
-          
+
           ls -lh
 
       - name: Upload artifact
@@ -165,14 +210,13 @@ jobs:
           retention-days: 1
 
   release:
-    needs: build
+    name: Create Release
+    needs: [check-version, build]
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -182,11 +226,9 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          
-          # Get the tag
-          TAG="${{ needs.build.outputs.build_tag }}"
-          [ -z "$TAG" ] && TAG="${{ inputs.caddy_tag }}"
-          
+
+          TAG="${{ needs.check-version.outputs.build_tag }}"
+
           # Move and rename artifacts
           for dir in artifacts/caddy-*; do
             if [ -d "$dir" ]; then
@@ -197,35 +239,38 @@ jobs:
               done
             fi
           done
-          
+
           # Create SHA256 checksum file
           cd release
           sha256sum * > caddy_${TAG}_checksums.txt
-          
+
           ls -lh
 
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.build.outputs.build_tag || inputs.caddy_tag }}
-          name: Caddy ${{ needs.build.outputs.build_tag || inputs.caddy_tag }} with L4 Plugin
+          tag_name: ${{ needs.check-version.outputs.build_tag }}
+          name: Caddy ${{ needs.check-version.outputs.build_tag }} with L4 Plugin
           body: |
-            Caddy ${{ needs.build.outputs.build_tag || inputs.caddy_tag }} built with [caddy-l4](https://github.com/mholt/caddy-l4) plugin support.
-            
+            Caddy ${{ needs.check-version.outputs.build_tag }} built with [caddy-l4](https://github.com/mholt/caddy-l4) and [caddyguard](https://github.com/qist/caddyguard) plugin support.
+
+            ## Included Plugins
+            - **caddy-l4** — Layer 4 TCP/UDP proxy
+            - **caddyguard** — Security/WAF module
+
             ## Included Platforms
             - Linux (amd64, arm64, armv7)
             - Windows (amd64, arm64)
             - macOS (amd64, arm64)
             - FreeBSD (amd64, arm64)
-            
+
             ## Checksums
-            SHA256 checksums are provided in `caddy_${{ needs.build.outputs.build_tag || inputs.caddy_tag }}_checksums.txt`.
-            
+            SHA256 checksums are provided in `caddy_${{ needs.check-version.outputs.build_tag }}_checksums.txt`.
+
             ## Usage
             The L4 (Layer 4) app allows Caddy to proxy raw TCP/UDP connections.
             See [caddy-l4 documentation](https://github.com/mholt/caddy-l4) for configuration examples.
-            
+
             ## File Naming
             ```
             caddy_<version>_<os>_<arch>.tar.gz  (Linux/macOS/FreeBSD)
@@ -235,12 +280,3 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
-
-      - name: Update built tag file
-        run: |
-          echo "${{ needs.build.outputs.build_tag || inputs.caddy_tag }}" > built_tag.txt
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add built_tag.txt
-          git commit -m "Update built tag to ${{ needs.build.outputs.build_tag || inputs.caddy_tag }}" || echo "No changes to commit"
-          git push || echo "Nothing to push"
