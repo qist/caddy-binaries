@@ -168,11 +168,17 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
+          GOCACHE: /tmp/go-build
+          GOMODCACHE: /tmp/go-mod
         run: |
+          # 清除 Go module 缓存，确保拉取最新插件代码
+          go clean -modcache
+
           mkdir -p build
           OUTPUT="build/caddy${{ matrix.ext }}"
 
           # Build with caddy-l4 and caddyguard plugins - fully static compilation
+          # 使用 --nobuild-cache 禁用 xcaddy 缓存，强制重新拉取最新代码
           xcaddy build ${{ needs.check-version.outputs.build_tag }} \
             --with github.com/mholt/caddy-l4 \
             --with github.com/qist/caddyguard \
@@ -186,7 +192,7 @@ jobs:
 
       - name: Fetch caddyguard rule-config
         run: |
-          # 浅克隆 caddyguard 仓库，获取规则配置文件
+          # 浅克隆 caddyguard 仓库，获取最新规则配置文件
           git clone --depth=1 https://github.com/qist/caddyguard.git /tmp/caddyguard
           cp -r /tmp/caddyguard/rule-config build/caddyguard
           rm -rf /tmp/caddyguard
