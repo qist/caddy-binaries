@@ -172,15 +172,17 @@ caddyguard 是一个 Caddy 安全防护插件，提供 WAF（Web 应用防火墙
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
 - **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
-- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ 64 分片 CC 存储 + Config 预合并缓存，WAF 开启仅 ~7% 性能开销
+- **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR、glob 通配符和精确匹配
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
 - **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
+- **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
 #### 配置方式
 
-CaddyGuard 提供两种配置方式：
+CaddyGuard 提供三种配置方式：
 
 ##### 方式 1：全局配置 + `caddyguardfile` 适配器（推荐）
 
@@ -236,15 +238,59 @@ example.com {
 caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 ```
 
-##### 两种方式对比
+##### 方式 3：JSON 配置（适合自动化部署 / Docker / K8s）
 
-| | 方式 1：caddyguardfile | 方式 2：caddyfile |
-|---|---|---|
-| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 |
-| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 |
-| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） |
-| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 |
-| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 |
+直接使用 Caddy 原生 JSON 配置，无需 adapter。WAF handler 需手动写在每个 route 的 `handle` 列表最前面。
+
+```json
+{
+    "apps": {
+        "caddyguard": {
+            "rule_dir": "/etc/caddyguard/rule-config"
+        },
+        "http": {
+            "servers": {
+                "srv0": {
+                    "automatic_https": { "disable": true },
+                    "listen": [":80"],
+                    "routes": [
+                        {
+                            "handle": [
+                                { "handler": "caddyguard" },
+                                { "handler": "reverse_proxy", "upstreams": [{ "dial": "127.0.0.1:8080" }] }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}
+```
+
+启动时不需要 `--adapter` 参数（默认即为 JSON）：
+
+```bash
+caddy run --config /etc/caddy/caddy.json
+```
+
+**关键点**：
+- `apps.caddyguard.rule_dir` 指定规则目录，与 Caddyfile 方式等效
+- 每个 route 的 `handle` 列表中，`{"handler": "caddyguard"}` 必须写在其他 handler 前面
+- 路径级 WAF 开关：`{"handler": "caddyguard", "waf_enable": "off"}`
+- WAF 检测开关仍由 `rule_dir/config.json` 控制
+
+##### 三种方式对比
+
+| | 方式 1：caddyguardfile | 方式 2：caddyfile | 方式 3：JSON |
+|---|---|---|---|
+| 全局配置 | ✅ 一次配置，所有站点自动生效 | ❌ 每个站点需单独写 | ❌ 每个 route 需手动写 |
+| 站点块 | 只写业务指令 | 需写 `caddyguard` 指令 | 需写 `caddyguard` handler |
+| 启动参数 | `--adapter caddyguardfile` | `--adapter caddyfile`（默认） | 不需要 adapter |
+| 站点级覆盖 | 支持（站点写 `caddyguard { rule_dir ... }`） | 支持 | 支持（route 级 `waf_enable`） |
+| 路径级开关 | ✅ Caddy 原生 path matcher | ✅ Caddy 原生 path matcher | ✅ route 级 `waf_enable: off` |
+| 自动注入 | ✅ adapter 自动注入 handler | ❌ 需手动写 `caddyguard` 指令 | ❌ 需手动写 handler |
+| 推荐场景 | 多站点统一 WAF | 单站点或精细控制 | 自动化部署 / Docker / K8s |
 
 #### 规则目录结构
 
