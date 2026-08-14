@@ -34,15 +34,21 @@ jobs:
 
       - name: Determine Caddy version
         id: get-version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           INPUT_TAG="${{ inputs.caddy_tag }}"
           if [ "$INPUT_TAG" = "latest" ] || [ -z "$INPUT_TAG" ]; then
-            TAG=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+            # 使用 gh CLI 获取最新 release tag（带认证，避免 API 速率限制）
+            TAG=$(gh release view --repo caddyserver/caddy --json tagName -q '.tagName' 2>/dev/null || \
+              curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+                https://api.github.com/repos/caddyserver/caddy/releases/latest \
+                | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
           else
             TAG="$INPUT_TAG"
           fi
 
-          if [ -z "$TAG" ]; then
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "Error: Failed to determine Caddy version"
             exit 1
           fi
