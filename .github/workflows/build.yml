@@ -190,13 +190,43 @@ jobs:
             ldd $OUTPUT 2>/dev/null || echo "Static binary (no ldd output expected)"
           fi
 
-      - name: Fetch caddyguard rule-config
+      - name: Fetch rule-config from nginxguard and generate caddyguard config
         run: |
-          # 浅克隆 caddyguard 仓库，获取最新规则配置文件
-          git clone --depth=1 https://github.com/qist/caddyguard.git /tmp/caddyguard
-          cp -r /tmp/caddyguard/rule-config build/caddyguard
-          rm -rf /tmp/caddyguard
-          echo "Rule config files:"
+          # 浅克隆 nginxguard 仓库，规则文件更完整且与 caddyguard 格式兼容
+          git clone --depth=1 https://github.com/qist/nginxguard.git /tmp/nginxguard
+          mkdir -p build/caddyguard
+          cp -r /tmp/nginxguard/rule-config/* build/caddyguard/
+          rm -rf /tmp/nginxguard
+
+          # 生成 caddyguard 格式的 config.json（nginxguard 用 config.lua，caddyguard 用 config.json）
+          cat > build/caddyguard/config.json << 'EOF'
+          {
+              "waf_enable": "on",
+              "trust_proxy_headers": "on",
+              "log_dir": "/var/log/caddyguard",
+              "url_check": "on",
+              "url_args_check": "on",
+              "post_check": "on",
+              "user_agent_check": "on",
+              "cookie_check": "on",
+              "cc_check": "on",
+              "cc_rate": "60/60",
+              "cc_block_ttl": 600,
+              "white_ip_check": "on",
+              "white_ua_check": "on",
+              "white_url_check": "on",
+              "black_ip_check": "on",
+              "referer_check": "off",
+              "file_upload_check": "on",
+              "waf_output": "html",
+              "waf_redirect_url": "https://www.caddyguard.com"
+          }
+          EOF
+
+          # 更新 domain.json 注释为 caddyguard 适用的说明
+          sed -i 's|config.lua|config.json|g; s|NginxGuard|CaddyGuard|g' build/caddyguard/domain.json 2>/dev/null || true
+
+          echo "Rule config files (from nginxguard + generated config.json):"
           ls -la build/caddyguard/
 
       - name: Create archive
