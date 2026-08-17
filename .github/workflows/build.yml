@@ -219,7 +219,7 @@ jobs:
               "referer_check": "off",
               "file_upload_check": "on",
               "waf_output": "html",
-              "waf_redirect_url": "https://www.waf.com"
+              "waf_redirect_url": "https://www.caddyguard.com"
           }
           EOF
 
