@@ -13,6 +13,7 @@
 - ✅ 每日自动检查更新
 - ✅ 基于 git tag 判断版本，避免重复构建
 - ✅ 官方格式的压缩包
+- ✅ WAF 全规则开启仅 ~1.7% 性能开销
 
 ## 支持的平台
 
@@ -64,6 +65,7 @@ caddy_v2.9.0_linux_amd64.tar.gz
     ├── whiteua.rule       # User-Agent 白名单
     ├── whiteurl.rule      # URL 白名单
     ├── blackip.rule       # IP 黑名单
+    ├── cdnip.rule         # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
     ├── fileext.rule       # 文件上传扩展名黑名单
     └── domains/           # 域名级独立规则目录
 ```
@@ -171,12 +173,17 @@ localhost:80 {
 caddyguard 是一个 Caddy 安全防护插件，提供 WAF（Web 应用防火墙）功能，包括：
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
-- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测、User-Agent/Cookie/Referer 检测、POST body 检测、文件上传扩展名检测
-- **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR、glob 通配符和精确匹配
-- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~11% 性能开销
+- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截）、文件上传扩展名检测
+- **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
+- **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~1.7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
-- **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录
+- **域名级配置**：支持全局配置 + 按域名覆盖（精确匹配 + 通配符）+ 域名级独立规则目录 + 域名级扫描阈值覆盖
 - **路径级配置**：支持基于 Caddy 原生 `path` matcher 的 WAF 开关，可对特定 URL 路径关闭 WAF
+- **Body 扫描控制**：`post_body_scan_limit` 超限直接拦截防部分扫描误放行；`multipart_streaming_check` 开关控制 multipart body 是否走流式扫描；`upload_filename_scan_limit` 控制文件名扫描范围
+- **bodyless 方法控制**：`bodyless` 配置项控制 GET/HEAD/OPTIONS 是否跳过 body 检测，支持域名级覆盖（如对特定域名强制全方法扫描）
+- **同步日志**：与 Lua 版一致，攻击日志同步落盘，不丢失。`sync.Mutex` 保护并发写入。日志字段自动截断到 4096 字节，防止单条日志过大
+- **cc_rate 配置校验**：无效的 `cc_rate` 配置自动记录错误日志，避免 CC 防护静默失效
+- **CDN 代理 IP 信任**：`cdnip.rule` 控制 XFF 信任范围，只有来自可信 CDN/代理 IP 的请求才信任 X-Forwarded-For，防直连伪造
 - **零 reflect/unsafe**：使用 Caddy 标准中间件链，不依赖私有字段反射
 - **ReDoS 安全**：基于 Go RE2 正则引擎，无回溯爆炸风险
 
@@ -298,27 +305,32 @@ caddy run --config /etc/caddy/caddy.json
 /etc/caddyguard/rule-config/
 ├── config.json          # 全局 WAF 配置
 ├── domain.json          # 域名级配置覆盖
-├── url.rule             # URL 路径黑名单（92 条规则）
-├── args.rule            # URL 参数黑名单（95 条规则，SQL注入/XSS/SSTI/RCE等）
-├── post.rule            # POST body 黑名单（96 条规则）
-├── cookie.rule          # Cookie 黑名单（96 条规则）
-├── useragent.rule       # 恶意 User-Agent 黑名单（5 条规则，扫描器/爬虫）
-├── referer.rule         # 恶意 Referer 黑名单（8 条规则，支付接口保护）
+├── url.rule             # URL 路径黑名单
+├── args.rule            # URL 参数黑名单（SQL注入/XSS/SSTI/RCE等）
+├── post.rule            # POST body 黑名单
+├── cookie.rule          # Cookie 黑名单
+├── useragent.rule       # 恶意 User-Agent 黑名单（扫描器/爬虫）
+├── referer.rule         # 恶意 Referer 黑名单（支付接口保护）
 ├── whiteip.rule         # IP 白名单
-├── whiteua.rule         # User-Agent 白名单（44 条，搜索引擎蜘蛛）
+├── whiteua.rule         # User-Agent 白名单（搜索引擎蜘蛛）
 ├── whiteurl.rule        # URL 白名单
 ├── blackip.rule         # IP 黑名单
+├── cdnip.rule           # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
 ├── fileext.rule         # 文件上传扩展名黑名单
 └── domains/             # 域名级独立规则目录
-    └── www.example.com/ # 该域名专用规则（8 个 .rule 文件）
+    └── www.example.com/ # 该域名专用规则（13 个 .rule 文件）
         ├── url.rule
         ├── args.rule
         ├── post.rule
         ├── cookie.rule
         ├── useragent.rule
+        ├── whiteua.rule
+        ├── referer.rule
+        ├── fileext.rule
         ├── whiteip.rule
         ├── whiteurl.rule
-        └── blackip.rule
+        ├── blackip.rule
+        └── cdnip.rule
 ```
 
 #### config.json 参数说明
@@ -326,7 +338,7 @@ caddy run --config /etc/caddy/caddy.json
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `waf_enable` | `"on"` | WAF 总开关，`"off"` 完全关闭 |
-| `trust_proxy_headers` | `"on"` | 信任 X-Forwarded-For 头获取客户端 IP |
+| `trust_proxy_headers` | `"on"` | 是否信任代理转发的 IP 头（X-Forwarded-For 等）。`"on"`=根据 `cdnip.rule` 判断是否信任转发头；`"off"`=只用 `remote_addr` 防伪造 |
 | `log_dir` | `/var/log/caddyguard` | WAF 日志目录 |
 | `url_check` | `"on"` | URL 路径检测开关 |
 | `url_args_check` | `"on"` | URL 参数检测开关 |
@@ -334,7 +346,7 @@ caddy run --config /etc/caddy/caddy.json
 | `user_agent_check` | `"on"` | User-Agent 检测开关 |
 | `cookie_check` | `"on"` | Cookie 检测开关 |
 | `cc_check` | `"on"` | CC 攻击防护开关 |
-| `cc_rate` | `"60/60"` | CC 速率限制，格式 `请求数/时间窗口秒` |
+| `cc_rate` | `"60/60"` | CC 速率限制，格式 `请求数/时间窗口秒`。无效配置自动记录错误日志并禁用 CC 检测 |
 | `cc_block_ttl` | `600` | CC 触发后封禁时长（秒） |
 | `white_ip_check` | `"on"` | IP 白名单检测开关 |
 | `white_ua_check` | `"on"` | UA 白名单检测开关 |
@@ -342,6 +354,10 @@ caddy run --config /etc/caddy/caddy.json
 | `black_ip_check` | `"on"` | IP 黑名单检测开关 |
 | `referer_check` | `"off"` | Referer 检测开关 |
 | `file_upload_check` | `"on"` | 文件上传扩展名检测开关 |
+| `bodyless` | `"on"` | bodyless 方法跳过开关。`"on"`=GET/HEAD/OPTIONS 跳过 body/post/file_upload 检测；`"off"`=所有方法都扫描 body |
+| `multipart_streaming_check` | `"off"` | multipart body 流式内容扫描开关。默认 `off`，关闭时仍保留文件名扩展名检查 |
+| `upload_filename_scan_limit` | `0` | multipart 文件名扫描上限（字节）。`0`=扫描整个文件；正整数=只扫描前 N 字节 |
+| `post_body_scan_limit` | `2097152` | 非 multipart body 扫描上限（字节）。超过此值直接拦截 |
 | `waf_output` | `"html"` | 拦截响应模式：`"html"` 返回拦截页面，`"redirect"` 302 跳转 |
 | `waf_redirect_url` | - | `waf_output` 为 redirect 时的跳转 URL |
 
@@ -369,8 +385,8 @@ sleep\((\s*)(\d*)(\s*)\)
 (Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher)
 
 # fileext.rule — 文件上传扩展名黑名单
-\.php
-.*\.(htaccess|bash_history|htpasswd|gitignore|gitattributes|env|config|sql|bak|backup|old|tmp|log|swp|sql\.gz)
+\.php\..*\.(htaccess|bash_history)
+\.(htaccess|bash_history|htpasswd|gitignore|gitattributes|env|config|sql|bak|backup|old|tmp|log|swp|sql\.gz)
 
 # referer.rule — 恶意 Referer 黑名单（支付接口保护）
 \.pay\.
@@ -386,6 +402,64 @@ bingbot
 360Spider
 YandexBot
 ```
+
+#### IP 规则文件格式
+
+`whiteip.rule`、`blackip.rule` 和 `cdnip.rule` 每行一条 IP 规则，支持三种格式：
+
+```
+# 1. CIDR 表示法（推荐，IPv4/IPv6 均支持）
+192.168.1.0/24          # IPv4 CIDR
+2001:db8::/32           # IPv6 CIDR
+10.0.0.0/8              # IPv4 大范围
+::1/128                 # IPv6 loopback
+
+# 2. glob 通配符
+192.168.1.*             # IPv4 通配符
+2001:db8::*             # IPv6 通配符
+192.168.*.*             # 多段通配符
+
+# 3. 精确匹配
+8.8.8.8                 # IPv4 精确
+2001:db8::5             # IPv6 精确
+::1                     # IPv6 loopback
+```
+
+#### CDN 代理 IP 信任（cdnip.rule）
+
+当 CaddyGuard 部署在 CDN/反向代理后面时，需要从 `X-Forwarded-For` 获取真实客户端 IP。但直接信任 XFF 会让攻击者伪造该头绕过 IP 黑白名单。
+
+解决方案：在 `config.json` 中设置 `trust_proxy_headers = "on"`，并在 `cdnip.rule` 中配置你实际使用的 CDN/代理 IP 段：
+
+```json
+// config.json
+{
+    "trust_proxy_headers": "on"
+}
+```
+
+```bash
+# cdnip.rule
+# 填入你实际使用的 CDN/代理 IP 段，以下为示例
+# Cloudflare IPv4
+173.245.48.0/20
+104.16.0.0/13
+# Cloudflare IPv6
+2400:cb00::/32
+2606:4700::/32
+# 内部代理/负载均衡器
+10.0.0.0/8
+192.168.0.0/16
+```
+
+此时 CaddyGuard 的行为：
+
+| 条件 | XFF 处理 | 说明 |
+|------|---------|------|
+| `remote_addr` 在 cdnip.rule 中 | 信任 XFF | 提取真实客户端 IP |
+| `remote_addr` 不在 cdnip.rule 中 | 不信任 XFF | 使用 `remote_addr`（防直连伪造） |
+| `cdnip.rule` 文件不存在 | 信任所有 XFF | 原始行为，向后兼容 |
+| `cdnip.rule` 文件为空 | 信任所有 XFF | 等同于文件不存在 |
 
 #### 三种白名单的区别
 
@@ -407,6 +481,16 @@ YandexBot
     "api.example.com": {
         "waf_enable": "off"
     },
+    "limit.example.com": {
+        "_comment": "示例：域名级 body/file 扫描阈值覆盖",
+        "multipart_streaming_check": "on",
+        "post_body_scan_limit": 1048576,
+        "upload_filename_scan_limit": 1024
+    },
+    "strict.example.com": {
+        "_comment": "示例：对该域名强制扫描所有方法的 body（包括 GET/HEAD/OPTIONS）",
+        "bodyless": "off"
+    },
     "*.test.com": {
         "post_check": "off",
         "cookie_check": "off"
@@ -414,9 +498,9 @@ YandexBot
 }
 ```
 
-- 精确域名：`www.example.com` → O(1) map 查找
-- 通配符域名：`*.example.com` → 加载时预解析为列表，按后缀匹配
-- 域名级规则目录：`rule_dir` 指定域名专用规则目录，该域名请求使用独立规则文件覆盖全局规则
+- **精确域名**：`www.example.com` → O(1) map 查找
+- **通配符域名**：`*.example.com` → 加载时预解析为列表，按后缀匹配
+- **域名级规则目录**：`rule_dir` 指定域名专用规则目录，该域名请求使用独立规则文件覆盖全局规则
 
 更多配置请参考 [caddyguard 官方文档](https://github.com/qist/caddyguard)。
 
