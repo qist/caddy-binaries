@@ -170,15 +170,27 @@ jobs:
           CGO_ENABLED: 0
           GOCACHE: /tmp/go-build
           GOMODCACHE: /tmp/go-mod
+          XCADDY_CACHE: /tmp/xcaddy-cache
+          # 关键：绕过 Go module proxy，直接 git 拉取 GitHub 仓库，
+          # 避免 proxy.golang.org 缓存默认分支 HEAD 导致拿到旧代码
+          GOPROXY: direct
+          # 直接拉取时跳过 sumdb 校验，避免私有/无 tag 仓库校验失败
+          GOSUMDB: off
         run: |
           # 清除 Go module 缓存，确保拉取最新插件代码
           go clean -modcache
+          # 清除 Go 构建缓存，强制重新编译
+          go clean -cache
+          # 清除 xcaddy 自身缓存（下载的 caddy 源码 + 编译中间产物），
+          # 避免头几次构建命中旧缓存。注意：xcaddy 没有 --nobuild-cache 参数，
+          # 只能靠删除缓存目录 + go clean -cache 实现。
+          rm -rf "$XCADDY_CACHE" "$HOME/.cache/xcaddy"
 
           mkdir -p build
           OUTPUT="build/caddy${{ matrix.ext }}"
 
           # Build with caddy-l4 and caddyguard plugins - fully static compilation
-          # 使用 --nobuild-cache 禁用 xcaddy 缓存，强制重新拉取最新代码
+          # 缓存已通过上面的清理步骤禁用，xcaddy 每次都会重新拉取并编译最新代码
           xcaddy build ${{ needs.check-version.outputs.build_tag }} \
             --with github.com/mholt/caddy-l4 \
             --with github.com/qist/caddyguard \
