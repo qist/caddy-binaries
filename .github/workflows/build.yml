@@ -174,8 +174,9 @@ jobs:
           # 关键：绕过 Go module proxy，直接 git 拉取 GitHub 仓库，
           # 避免 proxy.golang.org 缓存默认分支 HEAD 导致拿到旧代码
           GOPROXY: direct
-          # 直接拉取时跳过 sumdb 校验，避免私有/无 tag 仓库校验失败
-          GOSUMDB: off
+          # 注意：不能全局 GOSUMDB=off，否则官方 toolchain(golang.org/toolchain)
+          # 下载后也无法校验而 FATAL。仅对无 tag 的私有插件仓库豁免 sumdb 校验。
+          GONOSUMDB: github.com/qist/caddyguard
         run: |
           # 清除 Go module 缓存，确保拉取最新插件代码
           go clean -modcache
