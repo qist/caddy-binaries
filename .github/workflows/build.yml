@@ -15,6 +15,11 @@ on:
         description: 'Caddy version tag (e.g., v2.9.0)'
         required: false
         default: 'latest'
+      force_build:
+        description: 'Force rebuild even if the tag already exists (插件更新后重新打包时使用)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,6 +31,8 @@ jobs:
     outputs:
       build_tag: ${{ steps.check.outputs.build_tag }}
       should_build: ${{ steps.check.outputs.should_build }}
+      caddyguard_sha: ${{ steps.plugins.outputs.caddyguard_sha }}
+      l4_sha: ${{ steps.plugins.outputs.l4_sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -56,17 +63,42 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Caddy version: $TAG"
 
+      - name: Resolve plugin commits
+        id: plugins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 在 check 阶段解析一次插件最新 commit，所有矩阵任务共用同一个 SHA，
+          # 避免 xcaddy 解析 @latest 时命中 module proxy / runner 缓存拿到旧代码。
+          CG_SHA=$(gh api repos/qist/caddyguard/commits/main --jq .sha)
+          L4_SHA=$(gh api repos/mholt/caddy-l4/commits/master --jq .sha)
+
+          if [ -z "$CG_SHA" ] || [ "$CG_SHA" = "null" ] || [ -z "$L4_SHA" ] || [ "$L4_SHA" = "null" ]; then
+            echo "Error: Failed to resolve plugin commits"
+            exit 1
+          fi
+
+          echo "caddyguard_sha=$CG_SHA" >> $GITHUB_OUTPUT
+          echo "l4_sha=$L4_SHA" >> $GITHUB_OUTPUT
+          echo "caddyguard commit: $CG_SHA"
+          echo "caddy-l4   commit: $L4_SHA"
+
       - name: Check if already built
         id: check
         run: |
           TAG=${{ steps.get-version.outputs.tag }}
+          FORCE="${{ inputs.force_build }}"
 
-          if git tag | grep -q "^${TAG}$"; then
+          if git tag | grep -q "^${TAG}$" && [ "$FORCE" != "true" ]; then
             echo "Tag $TAG already exists, skipping build"
             echo "build_tag=$TAG" >> $GITHUB_OUTPUT
             echo "should_build=false" >> $GITHUB_OUTPUT
           else
-            echo "New version $TAG found, starting build"
+            if [ "$FORCE" = "true" ]; then
+              echo "Force rebuild requested for existing tag $TAG"
+            else
+              echo "New version $TAG found, starting build"
+            fi
             echo "build_tag=$TAG" >> $GITHUB_OUTPUT
             echo "should_build=true" >> $GITHUB_OUTPUT
           fi
@@ -169,17 +201,19 @@ jobs:
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
           # 注意：不能全局 GOSUMDB=off，否则官方 toolchain(golang.org/toolchain)
-          # 下载后也无法校验而 FATAL。仅对无 tag 的私有插件仓库豁免 sumdb 校验。
-          GONOSUMDB: github.com/qist/caddyguard
+          # 下载后也无法校验而 FATAL。仅对插件仓库豁免 sumdb 校验。
+          GONOSUMDB: github.com/qist/caddyguard,github.com/mholt/caddy-l4
+          # 插件走 git 直连，绕过 module proxy 的 @latest 缓存；其余依赖仍走代理保持速度
+          GONOPROXY: github.com/qist/caddyguard,github.com/mholt/caddy-l4
         run: |
           mkdir -p build
           OUTPUT="build/caddy${{ matrix.ext }}"
 
-          # Build with caddy-l4 and caddyguard plugins - fully static compilation
-          # 缓存已通过上面的清理步骤禁用，xcaddy 每次都会重新拉取并编译最新代码
+          # 插件固定到 check 阶段解析出的 commit（pseudo-version 不可变，模块缓存不会导致旧代码），
+          # 不再使用不带版本的 --with（那会解析 @latest，命中 proxy/runner 缓存时拿到旧 commit）
           xcaddy build ${{ needs.check-version.outputs.build_tag }} \
-            --with github.com/mholt/caddy-l4 \
-            --with github.com/qist/caddyguard \
+            --with github.com/mholt/caddy-l4@${{ needs.check-version.outputs.l4_sha }} \
+            --with github.com/qist/caddyguard@${{ needs.check-version.outputs.caddyguard_sha }} \
             --output $OUTPUT
 
           # Verify build - check for dynamic dependencies
@@ -187,6 +221,19 @@ jobs:
           if [ "${{ matrix.os }}" = "linux" ]; then
             ldd $OUTPUT 2>/dev/null || echo "Static binary (no ldd output expected)"
           fi
+
+      - name: Verify plugin commits embedded in binary
+        run: |
+          OUTPUT="build/caddy${{ matrix.ext }}"
+          CG_SHORT=$(echo "${{ needs.check-version.outputs.caddyguard_sha }}" | cut -c1-12)
+
+          INFO=$(go version -m "$OUTPUT")
+          echo "$INFO" | grep -E "github.com/(qist/caddyguard|mholt/caddy-l4)" || true
+
+          # caddyguard 无 tag，pseudo-version 末尾带 12 位 commit 哈希，可直接核对；
+          # caddy-l4 若 pin 到已打 tag 的 commit，build-info 会显示 tag 而非哈希，故只打印不校验
+          echo "$INFO" | grep "github.com/qist/caddyguard" | grep -q "$CG_SHORT" \
+            || { echo "ERROR: 打包产物里的 caddyguard 不是预期 commit（期望 ...$CG_SHORT），疑似缓存导致，终止发布"; exit 1; }
 
       - name: Fetch rule-config from nginxguard and generate caddyguard config
         run: |
@@ -303,8 +350,10 @@ jobs:
             Caddy ${{ needs.check-version.outputs.build_tag }} built with [caddy-l4](https://github.com/mholt/caddy-l4) and [caddyguard](https://github.com/qist/caddyguard) plugin support.
 
             ## Included Plugins
-            - **caddy-l4** — Layer 4 TCP/UDP proxy
-            - **caddyguard** — Security/WAF module
+            - **caddy-l4** — Layer 4 TCP/UDP proxy (`${{ needs.check-version.outputs.l4_sha }}`)
+            - **caddyguard** — Security/WAF module (`${{ needs.check-version.outputs.caddyguard_sha }}`)
+
+            > 插件已固定到上述 commit 构建（不再解析 `@latest`），可用 `go version -m caddy | grep caddyguard` 核对实际打包的 commit。
 
             ## Included Platforms
             - Linux (amd64, arm64, armv7)

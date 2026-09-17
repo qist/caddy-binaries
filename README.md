@@ -554,6 +554,30 @@ example.com {
 2. **版本对比**：通过 git tag 判断是否已构建过该版本，避免重复构建
 3. **自动发布**：检测到新版本时自动编译并发布到 Releases
 
+### 插件版本固定（避免打到旧代码）
+
+插件不再使用不带版本的 `--with`（那会解析 `@latest`，命中 module proxy / runner 缓存时会拿到旧 commit），而是：
+
+1. `check-version` 阶段用 GitHub API 解析 **caddyguard / caddy-l4 的最新 commit SHA**，所有矩阵任务共用同一个 SHA
+2. 构建时固定到该 commit：`--with github.com/qist/caddyguard@<sha>`（pseudo-version 不可变，Go 模块缓存不会导致旧代码）
+3. 插件模块走 git 直连（`GONOPROXY`）绕过 proxy 缓存
+4. 构建后用 `go version -m` 校验产物里嵌入的 commit 与预期一致，不一致直接失败，不发布
+5. 发布说明中记录两个插件的 commit，可用 `go version -m caddy | grep caddyguard` 自行核对
+
+### 插件更新后重新打包
+
+`git tag` 已存在时默认跳过构建；插件（caddyguard / nginxguard 规则）有更新需要重新出包时，
+手动触发 workflow 并勾选 `force_build`（或指定新的 `caddy_tag`）：
+
+```
+Actions → Auto Build Caddy with L4 Plugin → Run workflow
+  caddy_tag:  latest（或指定版本）
+  force_build: true
+```
+
+> 规则文件（`rule-config/`）在构建时从 [nginxguard](https://github.com/qist/nginxguard) 仓库实时克隆，
+> 所以**规则改动只要推送到 nginxguard 就会进下次打包**；`config.json` 由 CI 生成，新增配置项需同步修改 `build.yml`。
+
 ## 构建流程
 
 ```
@@ -561,11 +585,12 @@ example.com {
 │  build.yml (单一工作流)                                  │
 ├─────────────────────────────────────────────────────────┤
 │  1. check-version: 获取官方 Caddy 最新 tag              │
-│  2. check-version: 检查 git tag 是否已存在               │
-│  3. 如果 tag 不存在，触发多平台并行编译                  │
-│  4. 使用 xcaddy 编译 (包含 caddy-l4 + caddyguard)       │
-│  5. 生成多平台二进制文件并创建压缩包                     │
-│  6. release: 发布到 GitHub Releases 并创建 git tag       │
+│  2. check-version: 解析 caddyguard / caddy-l4 commit    │
+│  3. check-version: 检查 git tag 是否已存在（支持 force） │
+│  4. 如果 tag 不存在（或 force_build），触发多平台并行编译 │
+│  5. 使用 xcaddy 编译 (固定插件 commit) + 校验产物 commit │
+│  6. 生成多平台二进制文件并创建压缩包                     │
+│  7. release: 发布到 GitHub Releases 并创建 git tag       │
 └─────────────────────────────────────────────────────────┘
 ```
 
