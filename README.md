@@ -59,7 +59,8 @@ caddy_v2.9.0_linux_amd64.tar.gz
     ├── args.rule          # URL 参数黑名单
     ├── post.rule          # POST body 黑名单
     ├── cookie.rule        # Cookie 黑名单
-    ├── useragent.rule     # 恶意 User-Agent 黑名单
+    ├── useragent.rule     # 攻击扫描器 / 渗透工具 UA 黑名单
+    ├── header.rule        # 请求头黑名单（绕过类头/SSRF 元数据头/Log4Shell）
     ├── referer.rule       # 恶意 Referer 黑名单
     ├── whiteip.rule       # IP 白名单
     ├── whiteua.rule       # User-Agent 白名单
@@ -173,7 +174,7 @@ localhost:80 {
 caddyguard 是一个 Caddy 安全防护插件，提供 WAF（Web 应用防火墙）功能，包括：
 
 - **全局自动生效**：全局配置一次 `rule_dir`，所有站点自动启用 WAF，无需每个站点单独写 `caddyguard` 指令（通过 `caddyguardfile` 适配器实现）
-- **12 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截）、文件上传扩展名检测
+- **13 项检测链**：白名单 IP/URL/UA、黑名单 IP、CC 攻击防护、URL 路径/参数检测（含 256+ 参数截断兜底）、User-Agent/请求头/Cookie/Referer 检测、POST body 检测（含大 body 超限拦截 + 实体拆分兜底）、文件上传扩展名检测
 - **IPv4/IPv6 双栈**：IP 黑白名单同时支持 IPv4 和 IPv6，支持 CIDR 表示法（`192.168.1.0/24`、`2001:db8::/32`）、glob 通配符（`192.168.*.*`、`2001:db8::*`）和精确匹配
 - **高性能**：正则预编译（含 `(?i)` 大小写不敏感版本）+ POST body 关键词自动提取预过滤 + 64 分片 CC 存储 + Config 预合并缓存，WAF 全规则开启仅 ~1.7% 性能开销
 - **热加载**：规则和配置文件修改后 2 秒内自动生效，无需重启 Caddy
@@ -309,7 +310,8 @@ caddy run --config /etc/caddy/caddy.json
 ├── args.rule            # URL 参数黑名单（SQL注入/XSS/SSTI/RCE等）
 ├── post.rule            # POST body 黑名单
 ├── cookie.rule          # Cookie 黑名单
-├── useragent.rule       # 恶意 User-Agent 黑名单（扫描器/爬虫）
+├── useragent.rule       # 攻击扫描器 / 渗透工具 UA 黑名单
+├── header.rule          # 请求头黑名单（绕过类头/SSRF 元数据头/Log4Shell）
 ├── referer.rule         # 恶意 Referer 黑名单（支付接口保护）
 ├── whiteip.rule         # IP 白名单
 ├── whiteua.rule         # User-Agent 白名单（搜索引擎蜘蛛）
@@ -318,19 +320,19 @@ caddy run --config /etc/caddy/caddy.json
 ├── cdnip.rule           # CDN/可信代理 IP 列表（控制 XFF 信任，支持 CIDR）
 ├── fileext.rule         # 文件上传扩展名黑名单
 └── domains/             # 域名级独立规则目录
-    └── www.example.com/ # 该域名专用规则（13 个 .rule 文件）
+    └── www.example.com/ # 该域名专用规则（12 个 .rule 文件，未提供的文件回退全局）
         ├── url.rule
         ├── args.rule
         ├── post.rule
         ├── cookie.rule
         ├── useragent.rule
+        ├── header.rule
         ├── whiteua.rule
         ├── referer.rule
         ├── fileext.rule
         ├── whiteip.rule
         ├── whiteurl.rule
-        ├── blackip.rule
-        └── cdnip.rule
+        └── blackip.rule
 ```
 
 #### config.json 参数说明
@@ -344,6 +346,7 @@ caddy run --config /etc/caddy/caddy.json
 | `url_args_check` | `"on"` | URL 参数检测开关 |
 | `post_check` | `"on"` | POST body 检测开关 |
 | `user_agent_check` | `"on"` | User-Agent 检测开关 |
+| `header_check` | `"on"` | 请求头检测开关（`header.rule`：绕过类头 / SSRF 元数据头 / Log4Shell） |
 | `cookie_check` | `"on"` | Cookie 检测开关 |
 | `cc_check` | `"on"` | CC 攻击防护开关 |
 | `cc_rate` | `"60/60"` | CC 速率限制，格式 `请求数/时间窗口秒`。无效配置自动记录错误日志并禁用 CC 检测 |
@@ -379,10 +382,21 @@ select.+(from|limit)
 sleep\((\s*)(\d*)(\s*)\)
 \<(iframe|script|body|img|layer|div|meta|style|base|object|input)
 
-# useragent.rule — 恶意 UA
-(HTTrack|harvest|audit|dirbuster|pangolin|nmap|sqlmap|w3af|owasp|Nikto)
-(Acunetix|WebVulnScan|Paros|WebInspect|Burp|BurpSuite|WebScarab|Nuclei|httpx)
-(Python-urllib|Python-requests|Go-http-client|scrapy|bot|crawl|spider|fetcher)
+# useragent.rule — 攻击扫描器 / 渗透工具 UA（命中 403）
+# 短词必须加边界，避免误杀正常业务 UA
+(HTTrack|harvest|pangolin|nmap|sqlmap|w3af|fimap|havij|PycURL|netsparker|httperf|ApacheBench|wrk/|hey/|k6/)
+(Acunetix|WebVulnScan|Paros|WebInspect|\bBurp\b|BurpSuite|AppScan|Arachni|Skipfish|Wapiti|WhatWeb|Wfuzz|DirBuster|GoBuster|ffuf|dirmap|feroxbuster|Nuclei|subfinder|masscan|ZGrab|Shodan|Censys|wpscan|nikto|dirb|pwntools)
+((?:^|[^-\w])httpx/|httpx-cli\b)         # 不匹配 python-httpx/、httpx-client
+(?:^|[^-\w])amass(?:$|[^-\w])            # 不匹配 amass-client
+(OWASP ZAP|ZAP/)                         # 不匹配 OWASP-Dependency-Check
+(xray/|afrog|fscan|TscanPlus|Yakit|W13Scan|vulmap|PocSuite|BBOT|katana/|\bGoby\b)
+# 正常爬虫（Amazonbot/Applebot-Extended/ia_archiver）与调试工具（Postman/Charles/Fiddler）不拦截
+
+# header.rule — 请求头黑名单（多行匹配，^ 锚定头名）
+(?i:^x-middleware-subrequest:)           # Next.js CVE-2025-29927 中间件绕过
+(?i:^x-original-url:)
+(?i:^x-rewrite-url:)
+(?i:\$\{jndi:)                           # 请求头中的 Log4Shell / JNDI 注入
 
 # fileext.rule — 文件上传扩展名黑名单
 \.php\..*\.(htaccess|bash_history)
@@ -465,9 +479,9 @@ YandexBot
 
 | 白名单 | 文件 | 行为 | 说明 |
 |--------|------|------|------|
-| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 12 项检测 | 信任 IP，完全不做任何安全检测 |
-| **白名单 URL** | `whiteurl.rule` | **全局放行**，跳过全部 12 项检测 | 信任 URL 路径，完全不做任何安全检测 |
-| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/POST 等检测约束 |
+| **白名单 IP** | `whiteip.rule` | **全局放行**，跳过全部 13 项检测 | 信任 IP，完全不做任何安全检测 |
+| **白名单 URL** | `whiteurl.rule` | **仅跳过指定检测项**（默认只跳过 URL 路径检测），其他检测照常 | 可配置跳过哪些检测项（`user_agent`/`header`/`referer`/`url_attack`/`url_args`/`cookie`/`post`/`file_upload`/`cc`） |
+| **白名单 UA** | `whiteua.rule` | **仅跳过 UA 黑名单检测**，其他检测照常 | 搜索引擎蜘蛛免被 UA 黑名单误杀，但仍受 URL/参数/请求头/POST 等检测约束 |
 
 #### domain.json 域名级覆盖
 
