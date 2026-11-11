@@ -342,6 +342,24 @@ jobs:
 
           ls -lh
 
+      - name: Remove existing release assets (force rebuild)
+        if: inputs.force_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ needs.check-version.outputs.build_tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG exists, removing all existing assets"
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[].name' \
+              | while read -r asset; do
+                  [ -z "$asset" ] && continue
+                  echo "  deleting asset: $asset"
+                  gh release delete-asset "$TAG" "$asset" --repo "$GITHUB_REPOSITORY" --yes
+                done
+          else
+            echo "Release $TAG not found, nothing to remove"
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
